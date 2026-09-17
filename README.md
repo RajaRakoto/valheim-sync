@@ -1,17 +1,19 @@
 # valheim-sync
 
-Share one **Valheim world** with friends through free cloud storage, no dedicated server.
+Share your Valheim **local saves** with friends through free cloud storage, no dedicated server.
 Flow: `download` → play → `upload`. Anyone can become the host.
 
+The whole `worlds_local` folder is synced (all your worlds), as a compressed `tar.gz` archive.
 Windows + Linux. Python 3.12+ (stdlib only). Cloud: **Backblaze B2** (10 GB free) via **rclone**.
 
 ---
 
 ## How it works
 
-Valheim is P2P: only the host holds the world save. `valheim-sync` copies the world folder to
-the cloud after your session and restores it before the next one. The cloud always keeps the
-latest version plus a history (10 max) tagged with the uploader's name.
+Valheim is P2P: only the host holds the world save. `valheim-sync` archives the `worlds_local`
+folder to the cloud after your session and restores it before the next one. The cloud always
+keeps the latest version plus a history (10 max) tagged with the uploader's name; older archives
+are purged automatically.
 
 ```
 Player 1 (host) :  play    ->  upload
@@ -19,7 +21,21 @@ Player 2        :  download  ->  play  ->  upload
 Player 3        :  download  ->  play  ->  upload
 ```
 
-The world is stored as a `tar` archive (integrity checked with sha256).
+Only `worlds_local` matters. The `worlds` folder (Steam Cloud saves) is **never** touched.
+
+---
+
+## Local saves only (important)
+
+Valheim can store saves either **locally** (`worlds_local`) or on **Steam Cloud** (`worlds`).
+`valheim-sync` only syncs `worlds_local`, so you must play with local saves:
+
+1. In Steam, open **Valheim → Properties → General** and **disable Steam Cloud**.
+2. In Valheim, if a world lives in the cloud, migrate it once: **world list → Manage saves**,
+   then move it to local.
+3. Repeat for every player in the group.
+
+`init` reminds you and warns when it detects a non-empty `worlds` folder.
 
 ---
 
@@ -53,8 +69,8 @@ cd valheim-sync
 python sync.py init
 ```
 
-`init` asks for: username, world name, Valheim folder (auto-detected), rclone remote, bucket,
-then the B2 keys (only if `rclone.conf` does not exist yet).
+`init` asks for: username, Valheim folder (auto-detected), rclone remote, bucket, then the B2
+keys (only if `rclone.conf` does not exist yet).
 
 ---
 
@@ -64,15 +80,15 @@ then the B2 keys (only if `rclone.conf` does not exist yet).
 
 ```bash
 python sync.py init      # configure
-# launch Valheim, create/play the world, quit the game
-python sync.py upload    # push the world to the cloud
+# launch Valheim (local saves), create/play, quit the game
+python sync.py upload    # push worlds_local to the cloud
 ```
 
 ### Joining (new player)
 
 ```bash
-python sync.py init      # same bucket, same world name
-python sync.py download  # fetch the latest version
+python sync.py init      # same bucket
+python sync.py download  # fetch the latest saves
 # play, quit
 python sync.py upload
 ```
@@ -81,23 +97,23 @@ python sync.py upload
 
 | Command | Effect |
 |---|---|
-| `init` | configure username, world, path, cloud |
-| `upload` | push the local world (refused while Valheim runs) |
-| `download` | fetch the latest version + local backup |
+| `init` | configure username, path, cloud |
+| `upload` | push local saves (`worlds_local`) (refused while Valheim runs) |
+| `download` | fetch the latest saves + local backup |
 | `status` | compare local vs cloud (date, uploader, state) |
 | `list` | cloud history (10 max) |
 | `set-user <name>` | change your username (tracked on upload) |
-| `set-world <name>` | switch world (purges the old cloud copy) |
-| `set-path <folder>` | force the Valheim folder (useful on Linux) |
+| `set-path <folder>` | set the Valheim folder (useful on Linux) |
 | `set-cloud <remote:path>` | change the remote/bucket |
 
 Examples:
 
 ```bash
 python sync.py set-user Kratos
-python sync.py set-world Asgard
-python sync.py set-path "/home/raja/.local/share/Steam/steamapps/compatdata/892970/pfx/drive_c/users/steamuser/AppData/LocalLow/IronGate/Valheim"
+python sync.py set-path "/home/raja/GAMES/SteamLibrary/steamapps/compatdata/892970/pfx/drive_c/users/steamuser/AppData/LocalLow/IronGate/Valheim"
 ```
+
+`set-path` accepts either the Valheim root or the `worlds_local` folder itself.
 
 ---
 
@@ -111,21 +127,22 @@ python sync.py set-path "/home/raja/.local/share/Steam/steamapps/compatdata/8929
 | state | `%APPDATA%\valheim-sync\state.json` | `~/.config/valheim-sync/state.json` |
 | rclone | `<repo>\rclone.conf` | `<repo>/rclone.conf` |
 
-**Valheim saves** (auto-detected)
+**Valheim saves**
 
-- Windows: `%USERPROFILE%\AppData\LocalLow\IronGate\Valheim\`
-- Linux (Proton, app 892970):
-  `~/.local/share/Steam/steamapps/compatdata/892970/pfx/drive_c/users/steamuser/AppData/LocalLow/IronGate/Valheim/`
-  (also `~/.steam/steam/...` and Flatpak `~/.var/app/com.valvesoftware.Steam/...`)
+- Windows: `%USERPROFILE%\AppData\LocalLow\IronGate\Valheim\worlds_local\`
+- Linux (Proton, app 892970), inside the Steam library used for the game:
+  `<SteamLibrary>/steamapps/compatdata/892970/pfx/drive_c/users/steamuser/AppData/LocalLow/IronGate/Valheim/worlds_local/`
 
-The world lives in `worlds_local/<WorldName>/` (Valheim 1.0 format = folder).
+The Steam library path varies per user (e.g. `~/.local/share/Steam`, a custom
+`~/GAMES/SteamLibrary`, or a Flatpak install). If auto-detection fails, pass the absolute path
+with `set-path`.
 
 ---
 
 ## Safety
 
 - **Valheim must be closed**: `upload`/`download` refuse while the game runs.
-- **Automatic local backup** before every `download` (`<World>.bak-<date>`).
+- **Automatic local backup** before every `download` (`worlds_local.bak-<date>`).
 - **Integrity check**: sha256 of the archive before restoring.
 - **Overwrite guard**: if the cloud changed since your last `download`, `upload` is refused
   (run `download` first). No stale locks.
@@ -141,7 +158,7 @@ uvx ruff check .
 uvx ruff format .
 ```
 
-Tests: 51, coverage ~92%. The tests' fake rclone simulates the cloud on disk.
+Tests: 52, coverage ~93%. The tests' fake rclone simulates the cloud on disk.
 
 ---
 
@@ -152,7 +169,8 @@ Tests: 51, coverage ~92%. The tests' fake rclone simulates the cloud on disk.
 | `Valheim folder not found` | `python sync.py set-path <folder>` |
 | `rclone failed ... bucket` | check bucket/B2 keys, rerun `init` |
 | `Conflict: the cloud changed` | `python sync.py download`, then replay/`upload` |
-| Valheim does not see the restored world | check `set-path`, world format 1.0 |
+| Valheim does not see the restored world | check `set-path`, use local saves |
+| Steam Cloud warning on `init` | disable Steam Cloud, migrate to local saves |
 | History too large | automatic, 10 versions max |
 
 ---
