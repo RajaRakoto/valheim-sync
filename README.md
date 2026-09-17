@@ -43,7 +43,7 @@ Valheim can store saves either **locally** (`worlds_local`) or on **Steam Cloud*
 
 - **Python 3.12+** ([python.org](https://www.python.org/downloads/), tick "Add to PATH" on Windows).
 - **rclone**: *installed automatically* by the script when missing (Windows/Linux).
-- One free **Backblaze B2 account** (created once by the group, not per player).
+- One free **Backblaze B2 account per admin** (players need none).
 
 ---
 
@@ -57,7 +57,10 @@ Valheim can store saves either **locally** (`worlds_local`) or on **Steam Cloud*
    - *Allow access to Bucket(s)*: `valheim-sync` only
    - note the **keyID** and **applicationKey** (shown once).
 4. Pass them to `init` (below). The generated `rclone.conf` holds these keys:
-   **never commit it** (already in `.gitignore`). Share it with friends privately.
+   **never commit it** (already in `.gitignore`). Share them with friends privately.
+
+> Each admin/team uses its **own** bucket (or bucket prefix) and its own scoped key.
+> See *Several admins* below to switch between them.
 
 ---
 
@@ -105,6 +108,10 @@ python sync.py upload
 | `set-user <name>` | change your username (tracked on upload) |
 | `set-path <folder>` | set the Valheim folder (useful on Linux) |
 | `set-cloud <remote:path>` | change the remote/bucket |
+| `remote add <name> [base]` | add/update a remote and its B2 key (switching between admins) |
+| `remote use <name>` / `switch <name>` | make a remote active |
+| `remote list` | list configured remotes (`*` = active) |
+| `remote remove <name>` | forget a remote |
 
 Examples:
 
@@ -117,6 +124,35 @@ python sync.py set-path "/home/raja/GAMES/SteamLibrary/steamapps/compatdata/8929
 
 ---
 
+## Several admins (switching lists)
+
+Each admin hosts their own B2 bucket and its own world list. `valheim-sync` keeps **one active
+remote at a time**: switching changes which cloud your `upload`/`download`/`list` talk to. Your
+local saves, username and config stay untouched.
+
+One-time, per admin (on your machine):
+
+```bash
+python sync.py remote add adminB bucketB/team-b   # asks for that admin's keyID/applicationKey
+```
+
+Then switch whenever you want:
+
+```bash
+python sync.py remote list     # * marks the active remote
+python sync.py switch adminB   # alias of `remote use adminB`
+```
+
+Notes:
+
+- All players in the **same** list must point to the **same** `bucket/prefix`; the keys can
+  differ (one key per player is fine, as long as it is scoped to that bucket or prefix).
+- `rclone.conf` can hold several remotes; `remotes.json` remembers each one's bucket.
+- `remote add` re-prompts the key, so it also serves to **rotate** a key.
+- Only one list is active at a time — nothing is merged or synced in parallel.
+
+---
+
 ## Locations
 
 **Script's local files**
@@ -125,6 +161,7 @@ python sync.py set-path "/home/raja/GAMES/SteamLibrary/steamapps/compatdata/8929
 |---|---|---|
 | config | `%APPDATA%\valheim-sync\config.json` | `~/.config/valheim-sync/config.json` |
 | state | `%APPDATA%\valheim-sync\state.json` | `~/.config/valheim-sync/state.json` |
+| remotes | `%APPDATA%\valheim-sync\remotes.json` | `~/.config/valheim-sync/remotes.json` |
 | rclone | `<repo>\rclone.conf` | `<repo>/rclone.conf` |
 
 **Valheim saves**
@@ -158,7 +195,7 @@ uvx ruff check .
 uvx ruff format .
 ```
 
-Tests: 54, coverage ~93%. The tests' fake rclone simulates the cloud on disk.
+Tests: 69, coverage ~93%. The tests' fake rclone simulates the cloud on disk.
 
 ---
 
@@ -168,6 +205,8 @@ Tests: 54, coverage ~93%. The tests' fake rclone simulates the cloud on disk.
 |---|---|
 | `Valheim folder not found` | `python sync.py set-path <folder>` |
 | `rclone failed ... bucket` | check bucket/B2 keys, rerun `init` |
+| Wrong world list shown | `python sync.py remote list`, then `switch <name>` |
+| Admin rotated the key | `python sync.py remote add <name>` (re-enter the key) |
 | `Conflict: the cloud changed` | `python sync.py download`, then replay/`upload` |
 | Valheim does not see the restored world | check `set-path`, use local saves |
 | Steam Cloud warning on `init` | disable Steam Cloud, migrate to local saves |
