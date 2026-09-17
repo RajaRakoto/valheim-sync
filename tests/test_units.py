@@ -53,6 +53,7 @@ def test_archive_roundtrip(tmp_path: Path) -> None:
 
     archive = tmp_path / "world.tar.gz"
     sync.make_archive(src, archive)
+    assert archive.read_bytes()[:2] == b"\x1f\x8b"
     out = tmp_path / "out"
     out.mkdir()
     sync.extract_archive(archive, out)
@@ -250,6 +251,21 @@ def test_load_config_corrupted(env) -> None:
         sync.load_config()
 
 
+def test_load_config_not_object(env) -> None:
+    sync.config_path().write_text("[1, 2]", encoding="utf-8")
+    with pytest.raises(sync.SyncError):
+        sync.load_config()
+
+
+def test_read_meta_not_object(env) -> None:
+    env["make_config"]()
+    cfg = sync.load_config()
+    meta = env["cloud"] / "bucket" / "meta.json"
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text("[]", encoding="utf-8")
+    assert sync.read_meta(cfg) is None
+
+
 def test_read_meta_valid(env) -> None:
     env["make_config"]()
     cfg = sync.load_config()
@@ -317,7 +333,7 @@ def test_prompt_and_confirm_eof(monkeypatch: pytest.MonkeyPatch) -> None:
         raise EOFError
 
     monkeypatch.setattr("builtins.input", raise_eof)
-    assert sync.prompt("x", "defaut") == "defaut"
+    assert sync.prompt("x", "default") == "default"
     assert sync.confirm("q") is False
 
 

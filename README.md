@@ -158,7 +158,7 @@ uvx ruff check .
 uvx ruff format .
 ```
 
-Tests: 52, coverage ~93%. The tests' fake rclone simulates the cloud on disk.
+Tests: 54, coverage ~93%. The tests' fake rclone simulates the cloud on disk.
 
 ---
 

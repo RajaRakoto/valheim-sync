@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 APP_NAME = "valheim-sync"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 VALHEIM_APPID = "892970"
 RCLONE_DL = "https://downloads.rclone.org"
 USER_AGENT = f"{APP_NAME}/{VERSION}"
@@ -119,6 +119,8 @@ def _load_json(path: Path, cls):
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         die(f"unreadable file {path}: {exc}")
+    if not isinstance(data, dict):
+        die(f"invalid file {path}: expected a JSON object")
     known = set(cls.__dataclass_fields__)
     return cls(**{k: v for k, v in data.items() if k in known})
 
@@ -374,7 +376,7 @@ def install_rclone(cfg: Config) -> str:
             die(f"rclone download failed: {exc}")
         try:
             with zipfile.ZipFile(archive) as zf:
-                zf.extractall(tmp)
+                zf.extractall(tmp)  # trusted source: rclone's official zip
         except zipfile.BadZipFile as exc:
             die(f"invalid rclone archive: {exc}")
         exe_name = "rclone.exe" if os.name == "nt" else "rclone"
@@ -452,10 +454,14 @@ def read_meta(cfg: Config) -> dict | None:
     if result.returncode != 0 or not (result.stdout or "").strip():
         return None
     try:
-        return json.loads(result.stdout)
+        meta = json.loads(result.stdout)
     except json.JSONDecodeError:
         warn("cloud meta.json unreadable")
         return None
+    if not isinstance(meta, dict):
+        warn("cloud meta.json invalid (expected a JSON object)")
+        return None
+    return meta
 
 
 def upload_text(cfg: Config, name: str, text: str) -> None:
@@ -758,7 +764,7 @@ def cmd_set_path(args: argparse.Namespace) -> None:
 
 def cmd_set_cloud(args: argparse.Namespace) -> None:
     cfg = require_ready()
-    value = args.value or prompt("remote:base (e.g. valheim:valheim-sync/Midgard)", "")
+    value = args.value or prompt("remote:base (e.g. valheim:valheim-sync)", "")
     if ":" not in value:
         die("expected format remote:path")
     remote, _, base = value.partition(":")
@@ -778,7 +784,7 @@ def cmd_set_cloud(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=APP_NAME,
-        description="Share a Valheim world via cloud (download -> play -> upload).",
+        description="Share Valheim local saves via cloud (download -> play -> upload).",
     )
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
