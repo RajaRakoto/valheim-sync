@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 APP_NAME = "valheim-sync"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 VALHEIM_APPID = "892970"
 RCLONE_DL = "https://downloads.rclone.org"
 USER_AGENT = f"{APP_NAME}/{VERSION}"
@@ -90,6 +90,10 @@ def config_path() -> Path:
 
 def state_path() -> Path:
     return config_dir() / "state.json"
+
+
+def remotes_path() -> Path:
+    return config_dir() / "remotes.json"
 
 
 # --------------------------------------------------------------------------
@@ -420,18 +424,24 @@ def remote_uri(cfg: Config, *parts: str) -> str:
     return base
 
 
-def remote_section_exists(cfg: Config) -> bool:
+def rclone_remote_names() -> list[str]:
     conf = rclone_conf_path()
     if not conf.exists():
-        return False
+        return []
     text = conf.read_text(encoding="utf-8", errors="ignore")
-    return re.search(rf"^\[{re.escape(cfg.remote)}\]\s*$", text, re.MULTILINE) is not None
+    return re.findall(r"^\[(.+?)\]\s*$", text, re.MULTILINE)
 
 
-def write_rclone_remote(cfg: Config, account: str, key: str) -> None:
+def remote_section_exists(cfg: Config) -> bool:
+    return cfg.remote in rclone_remote_names()
+
+
+def write_rclone_remote(cfg: Config, account: str, key: str, *, force: bool = False) -> None:
     if remote_section_exists(cfg):
-        log("rclone remote already present, kept as is")
-        return
+        if not force:
+            log("rclone remote already present, kept as is")
+            return
+        remove_rclone_remote(cfg.remote)
     conf = rclone_conf_path()
     block = f"[{cfg.remote}]\ntype = b2\naccount = {account}\nkey = {key}\n"
     with conf.open("a", encoding="utf-8") as fh:
@@ -440,6 +450,55 @@ def write_rclone_remote(cfg: Config, account: str, key: str) -> None:
         fh.write(block)
     with suppress(OSError):
         conf.chmod(RCLONE_CONF_MODE)
+
+
+def remove_rclone_remote(name: str) -> bool:
+    conf = rclone_conf_path()
+    if not conf.exists():
+        return False
+    text = conf.read_text(encoding="utf-8")
+    pattern = re.compile(rf"^\[{re.escape(name)}\][^\[]*", re.MULTILINE | re.DOTALL)
+    cleaned, count = pattern.subn("", text)
+    if count == 0:
+        return False
+    cleaned = cleaned.strip()
+    conf.write_text(f"{cleaned}\n" if cleaned else "", encoding="utf-8")
+    return True
+
+
+def load_remotes() -> dict[str, str]:
+    path = remotes_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        die(f"unreadable file {path}: {exc}")
+    if not isinstance(data, dict):
+        die(f"invalid file {path}: expected a JSON object")
+    return {str(name): str(base) for name, base in data.items()}
+
+
+def save_remotes(remotes: dict[str, str]) -> None:
+    path = remotes_path()
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(remotes, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def validate_remote_name(name: str) -> str:
+    if not name or re.fullmatch(r"[A-Za-z0-9._-]+", name) is None:
+        die("invalid remote name (use letters, digits, dot, dash, underscore)")
+    return name
+
+
+def activate_remote(cfg: Config, name: str, base: str) -> None:
+    cfg.remote = name
+    cfg.remote_base = base
+    remotes = load_remotes()
+    remotes[name] = base
+    save_remotes(remotes)
+    save_config(cfg)
 
 
 def remote_available(cfg: Config) -> bool:
@@ -550,14 +609,12 @@ def _collect_valheim_root(cfg: Config) -> None:
 
 
 def _collect_cloud(cfg: Config) -> None:
-    cfg.remote = prompt("rclone remote name", cfg.remote or DEFAULT_REMOTE)
+    name = prompt("rclone remote name", cfg.remote or DEFAULT_REMOTE)
+    cfg.remote = validate_remote_name(name)
     cfg.remote_base = prompt("Backblaze B2 bucket", DEFAULT_BUCKET)
 
 
-def _ensure_rclone_remote(cfg: Config) -> None:
-    if remote_section_exists(cfg):
-        log("rclone remote already configured")
-        return
+def _prompt_credentials() -> tuple[str, str]:
     log("Backblaze B2 credentials (Application Key)")
     account = prompt("keyID", "")
     if not account:
@@ -565,6 +622,14 @@ def _ensure_rclone_remote(cfg: Config) -> None:
     key = prompt_secret("applicationKey")
     if not key:
         die("applicationKey required")
+    return account, key
+
+
+def _ensure_rclone_remote(cfg: Config) -> None:
+    if remote_section_exists(cfg):
+        log("rclone remote already configured")
+        return
+    account, key = _prompt_credentials()
     write_rclone_remote(cfg, account, key)
 
 
@@ -586,7 +651,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     _collect_valheim_root(cfg)
     _collect_cloud(cfg)
     _ensure_rclone_remote(cfg)
-    save_config(cfg)
+    activate_remote(cfg, cfg.remote, cfg.remote_base)
 
     if remote_available(cfg):
         log("cloud access OK")
@@ -770,10 +835,82 @@ def cmd_set_cloud(args: argparse.Namespace) -> None:
     remote, _, base = value.partition(":")
     if not remote or not base:
         die("expected format remote:path")
-    cfg.remote = remote
-    cfg.remote_base = base
-    save_config(cfg)
+    activate_remote(cfg, validate_remote_name(remote), base)
     log(f"cloud set: {cfg.remote}:{cfg.remote_base}")
+
+
+def _resolve_base(name: str, provided: str | None) -> str:
+    if provided:
+        return provided
+    stored = load_remotes().get(name)
+    if stored:
+        return stored
+    base = prompt("bucket/prefix (e.g. valheim-sync/team-a)", DEFAULT_BUCKET)
+    if not base:
+        die("cloud base required")
+    return base
+
+
+def cmd_remote_add(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    name = validate_remote_name(args.name)
+    cfg.remote = name
+    account, key = _prompt_credentials()
+    write_rclone_remote(cfg, account, key, force=True)
+    activate_remote(cfg, name, _resolve_base(name, args.base))
+    log(f"remote '{name}' added and active: {cfg.remote}:{cfg.remote_base}")
+
+
+def cmd_remote_use(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    name = validate_remote_name(args.name)
+    if name not in rclone_remote_names():
+        log(f"remote '{name}' has no credentials yet")
+        cfg.remote = name
+        account, key = _prompt_credentials()
+        write_rclone_remote(cfg, account, key, force=True)
+    activate_remote(cfg, name, _resolve_base(name, args.base))
+    log(f"active remote: {cfg.remote}:{cfg.remote_base}")
+
+
+def cmd_remote_list(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    remotes = load_remotes()
+    names = sorted(set(rclone_remote_names()) | set(remotes))
+    if not names:
+        log("no remote configured. Use `remote add <name>`.")
+        return
+    have_key = set(rclone_remote_names())
+    print("Configured remotes (* = active):")
+    for name in names:
+        mark = "*" if name == cfg.remote else " "
+        creds = "key ok" if name in have_key else "no key"
+        print(f"  {mark} {name:<16} -> {remotes.get(name, '?')}  [{creds}]")
+
+
+def cmd_remote_remove(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    name = validate_remote_name(args.name)
+    remotes = load_remotes()
+    removed_key = remove_rclone_remote(name)
+    removed_base = remotes.pop(name, None) is not None
+    if removed_base:
+        save_remotes(remotes)
+    if not removed_key and not removed_base:
+        die(f"unknown remote: {name}")
+    if cfg.remote == name:
+        warn(f"'{name}' was the active remote. Switch with `remote use <name>`.")
+    log(f"remote '{name}' removed")
+
+
+def cmd_remote(args: argparse.Namespace) -> None:
+    handlers = {
+        "add": cmd_remote_add,
+        "use": cmd_remote_use,
+        "list": cmd_remote_list,
+        "remove": cmd_remote_remove,
+    }
+    handlers[args.remote_command](args)
 
 
 # --------------------------------------------------------------------------
@@ -804,6 +941,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_cloud = sub.add_parser("set-cloud", help="set the cloud remote (remote:path)")
     p_cloud.add_argument("value", nargs="?")
 
+    p_remote = sub.add_parser("remote", help="manage cloud credentials (multi-admin)")
+    rsub = p_remote.add_subparsers(dest="remote_command", required=True)
+
+    r_add = rsub.add_parser("add", help="add or update a remote (prompts for its B2 key)")
+    r_add.add_argument("name")
+    r_add.add_argument("base", nargs="?")
+
+    r_use = rsub.add_parser("use", help="switch to a remote")
+    r_use.add_argument("name")
+    r_use.add_argument("base", nargs="?")
+
+    rsub.add_parser("list", help="list configured remotes")
+
+    r_remove = rsub.add_parser("remove", help="remove a remote")
+    r_remove.add_argument("name")
+
+    p_switch = sub.add_parser("switch", help="switch to a remote (alias of `remote use`)")
+    p_switch.add_argument("name")
+    p_switch.add_argument("base", nargs="?")
+
     return parser
 
 
@@ -827,6 +984,8 @@ def main(argv: list[str] | None = None) -> int:
         "set-user": cmd_set_user,
         "set-path": cmd_set_path,
         "set-cloud": cmd_set_cloud,
+        "remote": cmd_remote,
+        "switch": cmd_remote_use,
     }
 
     try:

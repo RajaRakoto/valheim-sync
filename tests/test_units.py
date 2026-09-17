@@ -179,6 +179,7 @@ def test_init_flow(env, monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.user == "Tester"
     assert cfg.remote_base == "bucket"
     assert sync.rclone_conf_path().exists()
+    assert sync.load_remotes()["valheim"] == "bucket"
 
 
 def test_set_path_and_cloud(env) -> None:
