@@ -1,6 +1,6 @@
 [project]
 name = "valheim-sync"
-version = "1.2.0"
+version = "1.2.1"
 description = "Share Valheim local saves between friends through free cloud storage (rclone + Backblaze B2)."
 requires-python = ">=3.12"
 dependencies = []

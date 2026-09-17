@@ -42,9 +42,8 @@ def test_download_roundtrip(env) -> None:
     assert (restored / "Midgard.db").read_text(encoding="utf-8") == "payload-abc"
     assert (restored / "chunks" / "part0").read_text(encoding="utf-8") == "payload-abc-chunk"
 
-    state = sync.load_state()
     meta = json.loads((env["cloud"] / "bucket" / "meta.json").read_text(encoding="utf-8"))
-    assert state.base_sha == meta["sha256"]
+    assert sync.load_base(sync.load_config()) == meta["sha256"]
 
 
 def test_download_backs_up_existing_world(env) -> None:

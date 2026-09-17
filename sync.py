@@ -25,12 +25,12 @@ import tempfile
 import urllib.request
 import zipfile
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
 APP_NAME = "valheim-sync"
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 VALHEIM_APPID = "892970"
 RCLONE_DL = "https://downloads.rclone.org"
 USER_AGENT = f"{APP_NAME}/{VERSION}"
@@ -113,7 +113,7 @@ class Config:
 
 @dataclass
 class State:
-    base_sha: str = ""
+    bases: dict[str, str] = field(default_factory=dict)
 
 
 def _load_json(path: Path, cls):
@@ -149,6 +149,25 @@ def load_state() -> State:
 
 def save_state(state: State) -> None:
     _save_json(state_path(), state)
+
+
+def remote_key(cfg: Config) -> str:
+    return f"{cfg.remote}:{cfg.remote_base.strip('/')}"
+
+
+def load_base(cfg: Config) -> str:
+    bases = load_state().bases
+    if not isinstance(bases, dict):
+        return ""
+    return bases.get(remote_key(cfg), "")
+
+
+def save_base(cfg: Config, sha: str) -> None:
+    state = load_state()
+    if not isinstance(state.bases, dict):
+        state.bases = {}
+    state.bases[remote_key(cfg)] = sha
+    save_state(state)
 
 
 # --------------------------------------------------------------------------
@@ -680,8 +699,7 @@ def cmd_upload(args: argparse.Namespace) -> None:
 
     meta = read_meta(cfg)
     remote_sha = (meta or {}).get("sha256", "")
-    state = load_state()
-    if remote_sha and remote_sha != state.base_sha:
+    if remote_sha and remote_sha != load_base(cfg):
         die("Conflict: the cloud changed since your last download. Run `download` first.")
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -708,8 +726,7 @@ def cmd_upload(args: argparse.Namespace) -> None:
 
     purge_history(cfg)
 
-    state.base_sha = sha
-    save_state(state)
+    save_base(cfg, sha)
     log(f"upload complete (by {cfg.user})")
 
 
@@ -756,16 +773,14 @@ def cmd_download(args: argparse.Namespace) -> None:
 
         shutil.move(str(inner), str(worlds_path))
 
-    state = load_state()
-    state.base_sha = remote_sha
-    save_state(state)
+    save_base(cfg, remote_sha)
     log(f"download complete (base={remote_sha[:12]})")
 
 
 def cmd_status(args: argparse.Namespace) -> None:
     cfg = require_ready()
     worlds_path = worlds_dir(cfg)
-    state = load_state()
+    base = load_base(cfg)
     meta = read_meta(cfg)
 
     world_count = sum(1 for _ in worlds_path.iterdir()) if worlds_path.is_dir() else 0
@@ -777,9 +792,9 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(f"cloud date    : {meta.get('timestamp', '?')}")
         print(f"cloud size    : {human_size(int(meta.get('size', 0)))}")
         print(f"cloud sha     : {str(meta.get('sha256', ''))[:12]}")
-        if not state.base_sha:
+        if not base:
             print("state         : never synced -> download")
-        elif state.base_sha == meta.get("sha256"):
+        elif base == meta.get("sha256"):
             print("state         : up to date")
         else:
             print("state         : behind / conflict -> download")

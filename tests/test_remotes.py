@@ -139,6 +139,12 @@ def test_set_cloud_records_base(env) -> None:
     assert sync.load_remotes()["valheim"] == "bucket/Other"
 
 
+def test_load_base_corrupted_state(env) -> None:
+    env["make_config"]()
+    sync.state_path().write_text('{"bases": []}', encoding="utf-8")
+    assert sync.load_base(sync.load_config()) == ""
+
+
 def test_load_remotes_not_object(env) -> None:
     env["make_config"]()
     sync.remotes_path().write_text("[]", encoding="utf-8")
@@ -150,6 +156,26 @@ def test_validate_remote_name() -> None:
     assert sync.validate_remote_name("team-a_1.2") == "team-a_1.2"
     with pytest.raises(sync.SyncError):
         sync.validate_remote_name("bad name")
+
+
+def test_base_sha_is_per_remote(env, monkeypatch) -> None:
+    valheim = env["make_config"]()
+    _feed(monkeypatch)
+    (valheim / "worlds_local" / "Midgard").mkdir(parents=True)
+    (valheim / "worlds_local" / "Midgard" / "Midgard.db").write_text("v1", encoding="utf-8")
+
+    assert sync.main(["upload"]) == 0
+    base_a = sync.load_base(sync.load_config())
+    assert base_a
+
+    assert sync.main(["remote", "add", "adminB", "bucketB/team-b"]) == 0
+    assert sync.load_base(sync.load_config()) == ""
+
+    assert sync.main(["upload"]) == 0
+    assert sync.load_base(sync.load_config())
+
+    assert sync.main(["remote", "use", "valheim", "bucket"]) == 0
+    assert sync.load_base(sync.load_config()) == base_a
 
 
 def test_switch_targets_other_cloud(env, monkeypatch) -> None:
