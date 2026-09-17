@@ -45,37 +45,37 @@ def test_sanitize_and_human_size() -> None:
     assert sync.human_size(2048).startswith("2.0 KB")
 
 
-def test_tar_roundtrip(tmp_path: Path) -> None:
+def test_archive_roundtrip(tmp_path: Path) -> None:
     src = tmp_path / "World"
     (src / "sub").mkdir(parents=True)
     (src / "World.db").write_text("x", encoding="utf-8")
     (src / "sub" / "b").write_text("y", encoding="utf-8")
 
-    archive = tmp_path / "world.tar"
-    sync.make_tar(src, archive)
+    archive = tmp_path / "world.tar.gz"
+    sync.make_archive(src, archive)
     out = tmp_path / "out"
     out.mkdir()
-    sync.extract_tar(archive, out)
+    sync.extract_archive(archive, out)
 
     assert (out / "World" / "World.db").read_text(encoding="utf-8") == "x"
     assert (out / "World" / "sub" / "b").read_text(encoding="utf-8") == "y"
 
 
-def test_extract_tar_rejects_traversal(tmp_path: Path) -> None:
+def test_extract_archive_rejects_traversal(tmp_path: Path) -> None:
     archive = tmp_path / "evil.tar"
     with tarfile.open(archive, "w") as tf:
         info = tarfile.TarInfo("../evil.txt")
         info.size = 1
         tf.addfile(info, io.BytesIO(b"x"))
     with pytest.raises(sync.SyncError):
-        sync.extract_tar(archive, tmp_path / "out")
+        sync.extract_archive(archive, tmp_path / "out")
 
 
-def test_extract_tar_invalid(tmp_path: Path) -> None:
+def test_extract_archive_invalid(tmp_path: Path) -> None:
     bad = tmp_path / "bad.tar"
     bad.write_bytes(b"not a tar")
     with pytest.raises(sync.SyncError):
-        sync.extract_tar(bad, tmp_path / "out")
+        sync.extract_archive(bad, tmp_path / "out")
 
 
 def test_detect_valheim_root_linux(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,7 +127,7 @@ def test_run_rclone_failure(env) -> None:
 def test_read_meta_invalid(env) -> None:
     env["make_config"]()
     cfg = sync.load_config()
-    meta = env["cloud"] / "bucket" / "Midgard" / "meta.json"
+    meta = env["cloud"] / "bucket" / "meta.json"
     meta.parent.mkdir(parents=True, exist_ok=True)
     meta.write_text("{invalid", encoding="utf-8")
     assert sync.read_meta(cfg) is None
@@ -137,7 +137,7 @@ def test_remote_available(env) -> None:
     env["make_config"]()
     cfg = sync.load_config()
     assert sync.remote_available(cfg) is False
-    (env["cloud"] / "bucket" / "Midgard").mkdir(parents=True, exist_ok=True)
+    (env["cloud"] / "bucket").mkdir(parents=True, exist_ok=True)
     assert sync.remote_available(cfg) is True
 
 
@@ -169,15 +169,14 @@ def test_init_flow(env, monkeypatch: pytest.MonkeyPatch) -> None:
     (valheim / "worlds_local" / "Midgard").mkdir(parents=True)
     sync.save_config(sync.Config(rclone_bin=str(env["fake"])))
 
-    answers = iter(["Tester", "Midgard", str(valheim), "valheim", "bucket", "kid", "n"])
+    answers = iter(["Tester", str(valheim), "valheim", "bucket", "kid", "n"])
     monkeypatch.setattr("builtins.input", lambda *a: next(answers))
     monkeypatch.setattr(sync.getpass, "getpass", lambda *a: "appkey")
 
     assert sync.main(["init"]) == 0
     cfg = sync.load_config()
     assert cfg.user == "Tester"
-    assert cfg.world == "Midgard"
-    assert cfg.remote_base == "bucket/Midgard"
+    assert cfg.remote_base == "bucket"
     assert sync.rclone_conf_path().exists()
 
 
@@ -207,15 +206,15 @@ def test_set_cloud_invalid(env) -> None:
 
 
 def test_upload_without_local_world(env) -> None:
-    env["make_config"]()
-    world = env["tmp"] / "valheim-Midgard" / "worlds_local" / "Midgard"
-    world.rmdir()
+    valheim = env["make_config"]()
+    (valheim / "worlds_local").rmdir()
     assert sync.main(["upload"]) == 1
 
 
 def test_upload_when_game_running(env, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sync, "game_running", lambda: True)
     valheim = env["make_config"]()
+    (valheim / "worlds_local" / "Midgard").mkdir()
     (valheim / "worlds_local" / "Midgard" / "Midgard.db").write_text("v1", encoding="utf-8")
     assert sync.main(["upload"]) == 1
 
@@ -254,7 +253,7 @@ def test_load_config_corrupted(env) -> None:
 def test_read_meta_valid(env) -> None:
     env["make_config"]()
     cfg = sync.load_config()
-    meta = env["cloud"] / "bucket" / "Midgard" / "meta.json"
+    meta = env["cloud"] / "bucket" / "meta.json"
     meta.parent.mkdir(parents=True, exist_ok=True)
     meta.write_text(json.dumps({"sha256": "abc"}), encoding="utf-8")
     assert sync.read_meta(cfg)["sha256"] == "abc"
@@ -265,12 +264,6 @@ def test_set_user_prompt(env, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("builtins.input", lambda *a: "NewName")
     assert sync.main(["set-user"]) == 0
     assert sync.load_config().user == "NewName"
-
-
-def test_set_world_same(env) -> None:
-    env["make_config"]()
-    assert sync.main(["set-world", "Midgard"]) == 0
-    assert sync.load_config().world == "Midgard"
 
 
 def test_set_path_prompt(env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -297,11 +290,26 @@ def test_resolve_valheim_root_auto(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert sync.resolve_valheim_root(sync.Config(valheim_root="auto")) == root
 
 
-def test_world_dir(tmp_path: Path) -> None:
+def test_worlds_dir(tmp_path: Path) -> None:
     root = tmp_path / "vh"
-    (root / "worlds_local" / "W").mkdir(parents=True)
-    cfg = sync.Config(world="W", valheim_root=str(root))
-    assert sync.world_dir(cfg) == root / "worlds_local" / "W"
+    (root / "worlds_local").mkdir(parents=True)
+    cfg = sync.Config(valheim_root=str(root))
+    assert sync.worlds_dir(cfg) == root / "worlds_local"
+
+
+def test_normalize_valheim_root(tmp_path: Path) -> None:
+    root = tmp_path / "vh"
+    worlds = root / "worlds_local"
+    worlds.mkdir(parents=True)
+    assert sync.normalize_valheim_root(worlds) == root
+    assert sync.normalize_valheim_root(root) == root
+
+
+def test_cloud_saves_dir(tmp_path: Path) -> None:
+    root = tmp_path / "vh"
+    (root / "worlds_local").mkdir(parents=True)
+    cfg = sync.Config(valheim_root=str(root))
+    assert sync.cloud_saves_dir(cfg) == root / "worlds"
 
 
 def test_prompt_and_confirm_eof(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,3 +357,18 @@ def test_detect_valheim_root_windows(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(sync.os, "name", "nt")
     monkeypatch.setattr(sync, "Path", _FakePath)
     assert sync.detect_valheim_root() == root
+
+
+def test_warn_about_steam_cloud(env, capsys) -> None:
+    root = env["make_config"]()
+    (root / "worlds").mkdir()
+    (root / "worlds" / "Steam.db").write_text("x", encoding="utf-8")
+
+    sync._warn_about_steam_cloud(sync.load_config())
+    assert "Steam Cloud" in capsys.readouterr().err
+
+
+def test_set_path_accepts_worlds_local(env) -> None:
+    valheim = env["make_config"]()
+    assert sync.main(["set-path", str(valheim / "worlds_local")]) == 0
+    assert sync.load_config().valheim_root == str(valheim)

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""valheim-sync - share a Valheim world through free cloud storage.
+"""valheim-sync - share Valheim local saves through free cloud storage.
 
-Sync a Valheim world folder between several players (Windows/Linux) using
-rclone and Backblaze B2. Flow: download -> play -> upload.
+Sync the whole worlds_local folder between several players (Windows/Linux)
+using rclone and Backblaze B2, as a compressed tar.gz archive.
+Flow: download -> play -> upload.
 
 Requires Python 3.12+. No external dependency (stdlib only).
 """
@@ -38,6 +39,10 @@ RCLONE_DOWNLOAD_TIMEOUT = 120
 RCLONE_CONF_MODE = 0o600
 DEFAULT_REMOTE = "valheim"
 DEFAULT_BUCKET = "valheim-sync"
+WORLDS_DIRNAME = "worlds_local"
+CLOUD_SAVES_DIRNAME = "worlds"
+ARCHIVE_SUFFIX = ".tar.gz"
+GZIP_COMPRESSLEVEL = 6
 
 
 class SyncError(Exception):
@@ -95,7 +100,6 @@ def state_path() -> Path:
 @dataclass
 class Config:
     user: str = ""
-    world: str = ""
     valheim_root: str = "auto"
     remote: str = "valheim"
     remote_base: str = ""
@@ -267,20 +271,34 @@ def detect_valheim_root() -> Path | None:
     return existing[0] if existing else None
 
 
+def normalize_valheim_root(path: Path) -> Path:
+    """Accept either the Valheim root or the worlds_local folder itself."""
+    if path.name == WORLDS_DIRNAME:
+        return path.parent
+    return path
+
+
 def resolve_valheim_root(cfg: Config) -> Path:
     if cfg.valheim_root and cfg.valheim_root != "auto":
-        root = Path(cfg.valheim_root).expanduser()
+        root = normalize_valheim_root(Path(cfg.valheim_root).expanduser())
         if not root.exists():
             die(f"Valheim folder not found: {root} (fix with `set-path`)")
         return root
     detected = detect_valheim_root()
     if detected is None:
-        die("Valheim folder not found automatically. Use `set-path <folder>`.")
+        die(
+            "Valheim folder not found automatically. "
+            f"Use `set-path <folder>` (the parent of {WORLDS_DIRNAME})."
+        )
     return detected
 
 
-def world_dir(cfg: Config) -> Path:
-    return resolve_valheim_root(cfg) / "worlds_local" / cfg.world
+def worlds_dir(cfg: Config) -> Path:
+    return resolve_valheim_root(cfg) / WORLDS_DIRNAME
+
+
+def cloud_saves_dir(cfg: Config) -> Path:
+    return resolve_valheim_root(cfg) / CLOUD_SAVES_DIRNAME
 
 
 def game_running() -> bool:
@@ -455,14 +473,14 @@ def upload_text(cfg: Config, name: str, text: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def make_tar(src: Path, out: Path) -> None:
-    with tarfile.open(out, "w") as tar_file:
+def make_archive(src: Path, out: Path) -> None:
+    with tarfile.open(out, "w:gz", compresslevel=GZIP_COMPRESSLEVEL) as tar_file:
         tar_file.add(src, arcname=src.name)
 
 
-def extract_tar(archive: Path, dest: Path) -> None:
+def extract_archive(archive: Path, dest: Path) -> None:
     try:
-        with tarfile.open(archive, "r") as tar_file:
+        with tarfile.open(archive, "r:*") as tar_file:
             tar_file.extractall(dest, filter="data")
     except tarfile.TarError as exc:
         die(f"invalid archive: {exc}")
@@ -477,7 +495,7 @@ def require_ready() -> Config:
     if not config_path().exists():
         die("no configuration. Run `init` first.")
     cfg = load_config()
-    missing = [name for name in ("user", "world", "remote_base") if not getattr(cfg, name)]
+    missing = [name for name in ("user", "remote_base") if not getattr(cfg, name)]
     if missing:
         die(f"incomplete configuration ({', '.join(missing)}). Run `init` again.")
     return cfg
@@ -507,9 +525,8 @@ def purge_history(cfg: Config) -> None:
 
 def _collect_identity(cfg: Config) -> None:
     cfg.user = prompt("Username", cfg.user or getpass.getuser())
-    cfg.world = prompt("World name (folder name inside worlds_local)", cfg.world)
-    if not cfg.world:
-        die("world name required")
+    if not cfg.user:
+        die("username required")
 
 
 def _collect_valheim_root(cfg: Config) -> None:
@@ -517,18 +534,18 @@ def _collect_valheim_root(cfg: Config) -> None:
     default_root = (
         cfg.valheim_root if cfg.valheim_root != "auto" else (str(detected) if detected else "")
     )
-    root = prompt("Valheim folder (parent of worlds_local)", default_root)
+    root = prompt(f"Valheim folder (parent of {WORLDS_DIRNAME})", default_root)
     if not root:
         die("Valheim folder required")
-    if not Path(root).expanduser().exists():
-        die(f"folder not found: {root}")
-    cfg.valheim_root = root
+    resolved = normalize_valheim_root(Path(root).expanduser())
+    if not resolved.exists():
+        die(f"folder not found: {resolved}")
+    cfg.valheim_root = str(resolved)
 
 
 def _collect_cloud(cfg: Config) -> None:
     cfg.remote = prompt("rclone remote name", cfg.remote or DEFAULT_REMOTE)
-    bucket = prompt("Backblaze B2 bucket", DEFAULT_BUCKET)
-    cfg.remote_base = f"{bucket}/{cfg.world}"
+    cfg.remote_base = prompt("Backblaze B2 bucket", DEFAULT_BUCKET)
 
 
 def _ensure_rclone_remote(cfg: Config) -> None:
@@ -545,6 +562,17 @@ def _ensure_rclone_remote(cfg: Config) -> None:
     write_rclone_remote(cfg, account, key)
 
 
+def _warn_about_steam_cloud(cfg: Config) -> None:
+    cloud_saves = cloud_saves_dir(cfg)
+    if cloud_saves.is_dir() and any(cloud_saves.iterdir()):
+        warn(
+            f"Steam Cloud saves detected in {cloud_saves}. "
+            f"valheim-sync only syncs local saves ({WORLDS_DIRNAME})."
+        )
+    log("Reminder: use LOCAL saves for Valheim (disable Steam Cloud).")
+    log("In Valheim: world list > Manage saves to migrate cloud -> local.")
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     cfg = load_config()
     log(f"Configuration {APP_NAME} v{VERSION}")
@@ -559,23 +587,25 @@ def cmd_init(args: argparse.Namespace) -> None:
     else:
         warn("cloud access unavailable for now (check bucket/keys)")
 
-    world_path = world_dir(cfg)
-    if world_path.is_dir():
-        log(f"local world detected: {world_path}")
-        if confirm("Upload this world now?"):
+    _warn_about_steam_cloud(cfg)
+
+    worlds_path = worlds_dir(cfg)
+    if worlds_path.is_dir():
+        log(f"local worlds detected: {worlds_path}")
+        if confirm("Upload these worlds now?"):
             cmd_upload(args)
     else:
-        log(f"local world missing ({world_path})")
-        log("To join an existing world: `download`.")
-        log("Otherwise create the world in Valheim then `upload`.")
+        log(f"local worlds missing ({worlds_path})")
+        log("To join an existing save: `download`.")
+        log("Otherwise play Valheim (local saves) then `upload`.")
 
 
 def cmd_upload(args: argparse.Namespace) -> None:
     cfg = require_ready()
     ensure_game_closed()
-    world_path = world_dir(cfg)
-    if not world_path.is_dir():
-        die(f"local world not found: {world_path}")
+    worlds_path = worlds_dir(cfg)
+    if not worlds_path.is_dir():
+        die(f"local worlds not found: {worlds_path}")
 
     meta = read_meta(cfg)
     remote_sha = (meta or {}).get("sha256", "")
@@ -584,20 +614,19 @@ def cmd_upload(args: argparse.Namespace) -> None:
         die("Conflict: the cloud changed since your last download. Run `download` first.")
 
     with tempfile.TemporaryDirectory() as tmp:
-        tar_path = Path(tmp) / f"{sanitize(cfg.world)}.tar"
-        log("creating the world archive...")
-        make_tar(world_path, tar_path)
-        sha = sha256_file(tar_path)
-        size = tar_path.stat().st_size
+        archive_path = Path(tmp) / f"{WORLDS_DIRNAME}{ARCHIVE_SUFFIX}"
+        log(f"creating the archive of {WORLDS_DIRNAME}...")
+        make_archive(worlds_path, archive_path)
+        sha = sha256_file(archive_path)
+        size = archive_path.stat().st_size
         log(f"archive: {human_size(size)} sha256={sha[:12]}")
 
-        run_rclone(cfg, ["copyto", str(tar_path), remote_uri(cfg, "latest.tar")])
-        history_name = f"{utc_stamp()}_{sanitize(cfg.user)}.tar"
-        run_rclone(cfg, ["copyto", str(tar_path), remote_uri(cfg, "history", history_name)])
+        run_rclone(cfg, ["copyto", str(archive_path), remote_uri(cfg, f"latest{ARCHIVE_SUFFIX}")])
+        history_name = f"{utc_stamp()}_{sanitize(cfg.user)}{ARCHIVE_SUFFIX}"
+        run_rclone(cfg, ["copyto", str(archive_path), remote_uri(cfg, "history", history_name)])
         log(f"history added: {history_name}")
 
     new_meta = {
-        "world": cfg.world,
         "uploader": cfg.user,
         "timestamp": iso_now(),
         "sha256": sha,
@@ -622,26 +651,26 @@ def cmd_download(args: argparse.Namespace) -> None:
     if not remote_sha:
         die("invalid cloud meta.json (missing sha256)")
 
-    world_path = world_dir(cfg)
-    world_path.parent.mkdir(parents=True, exist_ok=True)
+    worlds_path = worlds_dir(cfg)
+    worlds_path.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmp:
-        tar_path = Path(tmp) / "latest.tar"
+        archive_path = Path(tmp) / f"latest{ARCHIVE_SUFFIX}"
         log(
-            "downloading the world "
+            "downloading the worlds "
             f"(by {meta.get('uploader', '?')}, {meta.get('timestamp', '?')})..."
         )
-        run_rclone(cfg, ["copyto", remote_uri(cfg, "latest.tar"), str(tar_path)])
+        run_rclone(cfg, ["copyto", remote_uri(cfg, f"latest{ARCHIVE_SUFFIX}"), str(archive_path)])
 
-        got = sha256_file(tar_path)
+        got = sha256_file(archive_path)
         if got != remote_sha:
             die("invalid integrity (sha256 mismatch). No local change made.")
 
         extract_dir = Path(tmp) / "x"
         extract_dir.mkdir()
-        extract_tar(tar_path, extract_dir)
+        extract_archive(archive_path, extract_dir)
 
-        inner = extract_dir / cfg.world
+        inner = extract_dir / WORLDS_DIRNAME
         if not inner.is_dir():
             dirs = [p for p in extract_dir.iterdir() if p.is_dir()]
             if len(dirs) == 1:
@@ -649,12 +678,12 @@ def cmd_download(args: argparse.Namespace) -> None:
             else:
                 die("unexpected archive content")
 
-        if world_path.exists():
-            backup = world_path.with_name(f"{world_path.name}.bak-{utc_stamp()}")
-            world_path.rename(backup)
+        if worlds_path.exists():
+            backup = worlds_path.with_name(f"{worlds_path.name}.bak-{utc_stamp()}")
+            worlds_path.rename(backup)
             log(f"local backup: {backup.name}")
 
-        shutil.move(str(inner), str(world_path))
+        shutil.move(str(inner), str(worlds_path))
 
     state = load_state()
     state.base_sha = remote_sha
@@ -664,13 +693,14 @@ def cmd_download(args: argparse.Namespace) -> None:
 
 def cmd_status(args: argparse.Namespace) -> None:
     cfg = require_ready()
-    world_path = world_dir(cfg)
+    worlds_path = worlds_dir(cfg)
     state = load_state()
     meta = read_meta(cfg)
 
+    world_count = sum(1 for _ in worlds_path.iterdir()) if worlds_path.is_dir() else 0
     print(f"user          : {cfg.user}")
-    print(f"world         : {cfg.world}")
-    print(f"local         : {world_path} {'[present]' if world_path.exists() else '[absent]'}")
+    print(f"worlds folder : {worlds_path} {'[present]' if worlds_path.is_dir() else '[absent]'}")
+    print(f"local worlds  : {world_count}")
     if meta:
         print(f"cloud uploader: {meta.get('uploader', '?')}")
         print(f"cloud date    : {meta.get('timestamp', '?')}")
@@ -694,7 +724,7 @@ def cmd_list(args: argparse.Namespace) -> None:
         return
     print(f"History ({len(entries)}/{cfg.history_limit}):")
     for index, name in enumerate(entries, start=1):
-        base = name.removesuffix(".tar")
+        base = name.removesuffix(ARCHIVE_SUFFIX)
         stamp, _, uploader = base.partition("_")
         print(f"  {index:>2}. {stamp}  by {uploader or '?'}")
 
@@ -709,37 +739,16 @@ def cmd_set_user(args: argparse.Namespace) -> None:
     log(f"username set: {new_user}")
 
 
-def cmd_set_world(args: argparse.Namespace) -> None:
-    cfg = require_ready()
-    new_world = args.name or prompt("New world", "")
-    if not new_world:
-        die("world name required")
-    if new_world == cfg.world:
-        log("already on this world")
-        return
-    old_base = cfg.remote_base
-    if not confirm(f"Purge the cloud {old_base} and switch to '{new_world}'?"):
-        log("cancelled")
-        return
-    run_rclone(cfg, ["purge", remote_uri(cfg)], check=False)
-    bucket = old_base.split("/", 1)[0]
-    cfg.world = new_world
-    cfg.remote_base = f"{bucket}/{new_world}"
-    save_config(cfg)
-    save_state(State())
-    log(f"world switched to '{new_world}' (old cloud purged)")
-
-
 def cmd_set_path(args: argparse.Namespace) -> None:
     cfg = require_ready()
-    new_path = args.path or prompt("Valheim folder (parent of worlds_local)", cfg.valheim_root)
+    new_path = args.path or prompt(f"Valheim folder (parent of {WORLDS_DIRNAME})", cfg.valheim_root)
     if not new_path or new_path == "auto":
         cfg.valheim_root = "auto"
         save_config(cfg)
         detected = detect_valheim_root()
         log(f"auto detection: {detected or 'failed'}")
         return
-    resolved = Path(new_path).expanduser()
+    resolved = normalize_valheim_root(Path(new_path).expanduser())
     if not resolved.exists():
         die(f"folder not found: {resolved}")
     cfg.valheim_root = str(resolved)
@@ -774,17 +783,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("init", help="configure the script (username, world, B2)")
-    sub.add_parser("upload", help="push the local world to the cloud")
-    sub.add_parser("download", help="fetch the latest world version")
+    sub.add_parser("init", help="configure the script (username, B2, paths)")
+    sub.add_parser("upload", help="push local saves (worlds_local) to the cloud")
+    sub.add_parser("download", help="fetch the latest saves into worlds_local")
     sub.add_parser("status", help="compare local and cloud")
     sub.add_parser("list", help="list the cloud history")
 
     p_user = sub.add_parser("set-user", help="change your username")
     p_user.add_argument("name", nargs="?")
-
-    p_world = sub.add_parser("set-world", help="switch world (purges the old one)")
-    p_world.add_argument("name", nargs="?")
 
     p_path = sub.add_parser("set-path", help="set the Valheim folder")
     p_path.add_argument("path", nargs="?")
@@ -813,7 +819,6 @@ def main(argv: list[str] | None = None) -> int:
         "status": cmd_status,
         "list": cmd_list,
         "set-user": cmd_set_user,
-        "set-world": cmd_set_world,
         "set-path": cmd_set_path,
         "set-cloud": cmd_set_cloud,
     }

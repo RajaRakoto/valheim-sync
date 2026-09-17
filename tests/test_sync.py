@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 import sync
 
 
@@ -23,11 +21,11 @@ def test_upload_creates_cloud(env) -> None:
 
     assert sync.main(["upload"]) == 0
 
-    base = env["cloud"] / "bucket" / "Midgard"
-    assert (base / "latest.tar").is_file()
+    base = env["cloud"] / "bucket"
+    assert (base / "latest.tar.gz").is_file()
     meta = json.loads((base / "meta.json").read_text(encoding="utf-8"))
     assert meta["uploader"] == "Raja"
-    assert meta["world"] == "Midgard"
+    assert "world" not in meta
     assert len(list((base / "history").iterdir())) == 1
 
 
@@ -38,7 +36,6 @@ def test_download_roundtrip(env) -> None:
 
     valheim_b = env["tmp"] / "valheim-b"
     env["make_config"](root=valheim_b)
-    (valheim_b / "worlds_local" / "Midgard").rmdir()
 
     assert sync.main(["download"]) == 0
     restored = valheim_b / "worlds_local" / "Midgard"
@@ -46,9 +43,7 @@ def test_download_roundtrip(env) -> None:
     assert (restored / "chunks" / "part0").read_text(encoding="utf-8") == "payload-abc-chunk"
 
     state = sync.load_state()
-    meta = json.loads(
-        (env["cloud"] / "bucket" / "Midgard" / "meta.json").read_text(encoding="utf-8")
-    )
+    meta = json.loads((env["cloud"] / "bucket" / "meta.json").read_text(encoding="utf-8"))
     assert state.base_sha == meta["sha256"]
 
 
@@ -60,9 +55,9 @@ def test_download_backs_up_existing_world(env) -> None:
     _write_world(valheim, "Midgard", "local-dirty")
     assert sync.main(["download"]) == 0
 
-    backups = list((valheim / "worlds_local").glob("Midgard.bak-*"))
+    backups = list(valheim.glob("worlds_local.bak-*"))
     assert len(backups) == 1
-    assert (backups[0] / "Midgard.db").read_text(encoding="utf-8") == "local-dirty"
+    assert (backups[0] / "Midgard" / "Midgard.db").read_text(encoding="utf-8") == "local-dirty"
 
 
 def test_conflict_blocks_upload(env) -> None:
@@ -71,7 +66,7 @@ def test_conflict_blocks_upload(env) -> None:
     assert sync.main(["upload"]) == 0
     assert sync.main(["download"]) == 0
 
-    meta_path = env["cloud"] / "bucket" / "Midgard" / "meta.json"
+    meta_path = env["cloud"] / "bucket" / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["sha256"] = "deadbeef"
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
@@ -85,7 +80,7 @@ def test_purge_history_limit(env) -> None:
         _write_world(valheim, "Midgard", f"v{i}")
         assert sync.main(["upload"]) == 0
 
-    history = env["cloud"] / "bucket" / "Midgard" / "history"
+    history = env["cloud"] / "bucket" / "history"
     assert len(list(history.iterdir())) == 3
 
 
@@ -94,7 +89,7 @@ def test_download_rejects_corruption(env) -> None:
     _write_world(valheim, "Midgard", "v1")
     assert sync.main(["upload"]) == 0
 
-    (env["cloud"] / "bucket" / "Midgard" / "latest.tar").write_bytes(b"corrupted")
+    (env["cloud"] / "bucket" / "latest.tar.gz").write_bytes(b"corrupted")
 
     valheim_b = env["tmp"] / "valheim-b"
     env["make_config"](root=valheim_b)
@@ -106,28 +101,6 @@ def test_download_without_cloud_fails(env) -> None:
     assert sync.main(["download"]) == 1
 
 
-def test_set_world_purges_old_cloud(env, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sync, "confirm", lambda _question: True)
-    valheim = env["make_config"]()
-    _write_world(valheim, "Midgard", "v1")
-    assert sync.main(["upload"]) == 0
-
-    assert sync.main(["set-world", "Asgard"]) == 0
-
-    assert not (env["cloud"] / "bucket" / "Midgard").exists()
-    cfg = sync.load_config()
-    assert cfg.world == "Asgard"
-    assert cfg.remote_base == "bucket/Asgard"
-    assert sync.load_state().base_sha == ""
-
-
-def test_set_world_cancelled(env, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sync, "confirm", lambda _question: False)
-    env["make_config"]()
-    assert sync.main(["set-world", "Asgard"]) == 0
-    assert sync.load_config().world == "Midgard"
-
-
 def test_set_user_and_status(env, capsys) -> None:
     valheim = env["make_config"]()
     _write_world(valheim, "Midgard", "v1")
@@ -137,7 +110,7 @@ def test_set_user_and_status(env, capsys) -> None:
 
     assert sync.main(["status"]) == 0
     out = capsys.readouterr().out
-    assert "Midgard" in out
+    assert "worlds_local" in out
     assert "Kratos" in out
 
 

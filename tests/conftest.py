@@ -76,19 +76,17 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     fake.chmod(0o755)
 
     def make_config(
-        world: str = "Midgard",
         user: str = "Raja",
         history: int = 10,
         root: Path | None = None,
     ) -> Path:
-        valheim = root or (tmp_path / f"valheim-{world}")
-        (valheim / "worlds_local" / world).mkdir(parents=True, exist_ok=True)
+        valheim = root or (tmp_path / "valheim")
+        (valheim / "worlds_local").mkdir(parents=True, exist_ok=True)
         cfg = sync.Config(
             user=user,
-            world=world,
             valheim_root=str(valheim),
             remote="valheim",
-            remote_base=f"bucket/{world}",
+            remote_base="bucket",
             history_limit=history,
             rclone_bin=str(fake),
         )
