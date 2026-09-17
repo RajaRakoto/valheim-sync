@@ -1,0 +1,20 @@
+[project]
+name = "valheim-sync"
+version = "1.0.0"
+description = "Share a Valheim world between friends through free cloud storage (rclone + Backblaze B2)."
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "PYI", "FURB"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
